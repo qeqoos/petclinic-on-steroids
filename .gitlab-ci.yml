@@ -1,0 +1,83 @@
+stages:
+  - pre-infra
+  - infra
+  - deploy
+
+.export_vars: &export_vars
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} 
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+  - export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+
+.terraform_init_full: &terraform_init_full
+  - terraform init -backend-config="bucket=${TF_VAR_BUCKET_NAME}" -backend-config="dynamodb_table=${TF_VAR_DYNAMODB_NAME}"
+
+.concat_registry: &concat_registry
+  - export REGISTRY="$(aws sts get-caller-identity --query 'Account' --output text).dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+.install_kubectl: &install_kubectl
+  - apt-get update
+  - apt-get install -y apt-transport-https ca-certificates curl gettext-base
+  - curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+  - echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | tee /etc/apt/sources.list.d/kubernetes.list
+  - apt-get update
+  - apt-get install -y kubectl
+
+bucket-dynamo-ecr:
+  image: qeqoos/tf-awscli:1.0.0
+  stage: pre-infra
+  before_script:
+    - *export_vars
+  script:
+    - cd ./terraform
+    - ./bucket-check.sh ${TF_VAR_BUCKET_NAME}
+    - ./lock-table-check.sh ${TF_VAR_DYNAMODB_NAME}
+    - rm -f outputs.tf
+    - *terraform_init_full
+    - terraform apply -target="aws_ecr_repository.registry" -var="APP_NAME=${TF_VAR_APP_NAME}" -var="DB_PASSWORD=placeholder" -auto-approve
+
+terraform-create:
+  image: qeqoos/tf-awscli:1.0.0
+  stage: infra
+  before_script:
+    - *export_vars
+  script:
+    - cd terraform
+    - *terraform_init_full
+    - terraform apply -var="APP_NAME=${TF_VAR_APP_NAME}" -var="CLUSTER_NAME=${TF_VAR_CLUSTER_NAME}" -var="DB_PASSWORD=${TF_VAR_DB_PASSWORD}" -auto-approve
+
+build-push:
+  image: docker:20.10.12-alpine3.15
+  stage: infra
+  before_script:
+    - *export_vars
+    - apk add --no-cache curl jq python3 py3-pip
+    - pip install awscli
+    - *concat_registry
+    - aws ecr get-login-password | docker login -u AWS --password-stdin "https://${REGISTRY}"
+  script:
+    - docker build -t ${TF_VAR_APP_NAME}:latest .
+    - echo "${REGISTRY}/${TF_VAR_APP_NAME}:latest"
+    - docker tag ${TF_VAR_APP_NAME}:latest ${REGISTRY}/${TF_VAR_APP_NAME}:latest
+    - docker push ${REGISTRY}/${TF_VAR_APP_NAME}:latest
+
+k8s-deploy:
+  image: qeqoos/tf-awscli:1.0.0
+  stage: deploy
+  before_script:
+    - *export_vars
+    - *concat_registry
+  script:
+    - cd ./k8s
+    - *install_kubectl
+    - aws eks update-kubeconfig --name ${TF_VAR_CLUSTER_NAME}
+    - kubectl create secret generic db-cred --from-literal=DB_PASSWORD="${TF_VAR_DB_PASSWORD}"
+    - envsubst < deployment.yml | kubectl apply -f -
+    - envsubst < svc.yml | kubectl apply -f -
+    - export DB_ENDPOINT=$(aws rds describe-db-instances --filters "Name=engine,Values=aurora-mysql" --query "*[].[Endpoint.Port,MasterUsername,Endpoint.Address]" | grep rds | xargs echo)
+    - envsubst < rds-externalname.yml | kubectl apply -f -
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: always
+    - when: never

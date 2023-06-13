@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: ${TF_VAR_APP_NAME}
+  name: ${TF_VAR_APP_NAME}-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${TF_VAR_APP_NAME}
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: ${TF_VAR_APP_NAME}
+    spec:
+      containers:
+      - image: ${REGISTRY}/${TF_VAR_APP_NAME}:latest
+        name: ${TF_VAR_APP_NAME}
+        envFrom:
+        - secretRef:
+            name: db-cred
+        ports:
+        - containerPort: 8080
+        resources: {}
+

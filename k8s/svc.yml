@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${TF_VAR_APP_NAME}-lb
+spec:
+  ports:
+  - name: 80-80
+    port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: ${TF_VAR_APP_NAME}
+  type: LoadBalancer
+status:
+  loadBalancer: {}
